@@ -18,6 +18,9 @@ patterns, and what not to touch.
 | pyqt-camera-dashboard | [pyqt-camera-dashboard-modification-guide.md](./pyqt-camera-dashboard-modification-guide.md) |
 | matrix-rain | [matrix-rain-modification-guide.md](./matrix-rain-modification-guide.md) |
 | multi-file-diff-tool | [multi-file-diff-tool-modification-guide.md](./multi-file-diff-tool-modification-guide.md) |
+| meta-prompt-engine | [meta-prompt-engine-modification-guide.md](./meta-prompt-engine-modification-guide.md) |
+| bleedingtones | [bleedingtones-modification-guide.md](./bleedingtones-modification-guide.md) |
+| guided-build-framework | [guided-build-framework-modification-guide.md](./guided-build-framework-modification-guide.md) |
 ---
 
 Built by [MainbyteLabs](https://github.com/MR-MainbyteLabs)
