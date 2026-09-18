@@ -16,6 +16,8 @@ patterns, and what not to touch.
 | highlight-scraper | [highlight-scraper-modification-guide.md](./highlight-scraper-modification-guide.md) |
 | microcam-benchscope | [microcam-benchscope-modification-guide.md](./microcam-benchscope-modification-guide.md) |
 | pyqt-camera-dashboard | [pyqt-camera-dashboard-modification-guide.md](./pyqt-camera-dashboard-modification-guide.md) |
+| matrix-rain | [matrix-rain-modification-guide.md](./matrix-rain-modification-guide.md) |
+| multi-file-diff-tool | [multi-file-diff-tool-modification-guide.md](./multi-file-diff-tool-modification-guide.md) |
 ---
 
 Built by [MainbyteLabs](https://github.com/MR-MainbyteLabs)
