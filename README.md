@@ -13,8 +13,8 @@ patterns, and what not to touch.
 | Tool | Guide |
 |---|---|
 | sftp-ultra | [sftp-ultra-modification-guide.md](./sftp-ultra-modification-guide.md) |
-| highlight-scraper | [highlight-scraper-modification-guide.md](./highlight-scraper-complete-modification-guide.md) |
-
+| highlight-scraper | [highlight-scraper-modification-guide.md](./highlight-scraper-modification-guide.md) |
+| microcam-benchscope | [microcam-benchscope-modification-guide.md](./microcam-benchscope-modification-guide.md) |
 ---
 
 Built by [MainbyteLabs](https://github.com/MR-MainbyteLabs)
