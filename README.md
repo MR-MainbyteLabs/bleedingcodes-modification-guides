@@ -21,6 +21,12 @@ patterns, and what not to touch.
 | meta-prompt-engine | [meta-prompt-engine-modification-guide.md](./meta-prompt-engine-modification-guide.md) |
 | bleedingtones | [bleedingtones-modification-guide.md](./bleedingtones-modification-guide.md) |
 | guided-build-framework | [guided-build-framework-modification-guide.md](./guided-build-framework-modification-guide.md) |
+| security-scanner | [security-scanner-modification-guide.md](./security-scanner-modification-guide.md) |
+| ssh-vid-mover | [ssh-vid-mover-modification-guide.md](./ssh-vid-mover-modification-guide.md) |
+| PureTrace | [PureTrace-modification-guide.md](./PureTrace-modification-guide.md) |
+| lumen-lang | [lumen-lang-modification-guide.md](./lumen-lang-modification-guide.md) |
+| EvoForge | [EvoForge-modification-guide.md](./EvoForge-modification-guide.md) |
+| rd-idea-engine | [rd-idea-engine-modification-guide.md](./rd-idea-engine-modification-guide.md) |
 ---
 
 Built by [MainbyteLabs](https://github.com/MR-MainbyteLabs)
