@@ -1,5 +1,5 @@
 # meta-prompt-engine — Modification Guide
-**File:** `meta-prompt-engine.html` (single-file browser application)  
+**File:** `meta-prompt-engine.html` (single-file browser application, ~38KB)  
 **No build step. No server. No dependencies.**  
 **External resources:** IBM Plex Mono and IBM Plex Sans from Google Fonts (graceful fallback if unavailable)
 
@@ -7,13 +7,13 @@
 
 ## Who This Document Is For
 
-Engineers and developers who want to extend the prompt architecture, add model support, change the UI, or embed the engine's logic in another tool. This is not a usage guide — the README covers that. This document tells you where the code lives inside the HTML file and exactly where to make each class of change.
+Engineers and developers who want to extend the prompt architecture, add model support, change the UI, or embed the engine's logic in another tool. This is not a usage guide — the README covers that. This document uses the actual function names, variable names, and data structures from the source.
 
 ---
 
 ## File Structure
 
-Everything lives in one `.html` file in this order:
+Everything is in one `.html` file in this order:
 
 ```
 <head>
@@ -21,255 +21,480 @@ Everything lives in one `.html` file in this order:
   <style> — all CSS
 </head>
 <body>
-  UI markup — controls and output panels
+  UI markup
+    #domain               select — 8 domain options
+    #use-case             select — 5 use case options
+    #model-target         select — 4 model options
+    #key-row              API key input row (hidden for agnostic)
+    #agnostic-note        shown when model-agnostic is selected
+    #task-desc            textarea — task description
+    #component-toggles    6 toggle buttons (role/context/task/format/chain/guard)
+    #generate-btn         submit button
+    #status               status text span
+    #output-card          result card (hidden until first generation)
+      #panel-anatomy      anatomy tab — #anatomy-blocks
+      #panel-raw          raw tab — #raw-text, #copy-btn
+      meta pills          #meta-model, #meta-domain, #meta-use, #meta-blocks
   <script>
-    Configuration constants
-    Meta-prompt system prompt builders (one per model)
-    Model-Agnostic assembler
-    API caller functions (one per provider)
-    SSE streaming parsers (one per provider)
-    UI render functions (anatomy view, raw view)
-    Event handlers (form submit, copy, tab switch)
-  </script>
+    MODEL_CONFIG          model registry object
+    TAG_CONFIG            block type registry object
+    activeToggles         Set — currently enabled block keys
+    rawPromptText         string — assembled raw prompt for copy
+    updateKeyUI()         show/hide API key row based on selected model
+    buildMetaSystemPrompt() system prompt sent to the model
+    callClaude()          Anthropic SSE caller
+    callOpenAI()          OpenAI SSE caller
+    callGemini()          Google SSE caller
+    buildAgnosticPrompt() local assembly — no API call
+    renderAnatomy()       renders parsed blocks into #anatomy-blocks
+    showSkeleton()        loading state placeholder
+    assembleRaw()         builds the copyable raw prompt string
+    updateMeta()          updates the four meta pills
+    setStatus()           updates #status text and CSS class
+    escHtml()             HTML escaper
+    parseJSON()           JSON parser with markdown fence fallback
+    generate-btn click    main event handler — orchestrates the full flow
+</script>
 </body>
 ```
 
-All modification targets are inside the `<script>` block. The CSS and HTML markup are straightforward — search by element ID or class when adjusting the UI.
+---
+
+## Data Structures
+
+### `MODEL_CONFIG`
+
+Object keyed by model value string. Drives all model-switching UI behavior.
+
+```javascript
+const MODEL_CONFIG = {
+  claude: {
+    label: 'Claude (Anthropic)',
+    keyLabel: 'Anthropic API Key',
+    keyPlaceholder: 'sk-ant-...',
+    keyNote: '...HTML link to console.anthropic.com...',
+    endpoint: 'https://api.anthropic.com/v1/messages',
+    model: 'claude-sonnet-4-6',
+  },
+  gpt4: {
+    label: 'GPT-4o (OpenAI)',
+    keyLabel: 'OpenAI API Key',
+    keyPlaceholder: 'sk-...',
+    keyNote: '...HTML link to platform.openai.com...',
+    endpoint: 'https://api.openai.com/v1/chat/completions',
+    model: 'gpt-4o',
+  },
+  gemini: {
+    label: 'Gemini 2.0 Flash (Google)',
+    keyLabel: 'Google AI API Key',
+    keyPlaceholder: 'AIza...',
+    keyNote: '...HTML link to aistudio.google.com...',
+    endpoint: null,   // URL built dynamically in callGemini()
+    model: 'gemini-2.0-flash',
+  },
+  agnostic: {
+    label: 'Model-Agnostic',
+    keyLabel: null,   // no key field shown
+    keyNote: null,
+    endpoint: null,
+    model: null,
+  },
+};
+```
+
+### `TAG_CONFIG`
+
+Object keyed by block type string. Drives both the toggle buttons and the anatomy view rendering.
+
+```javascript
+const TAG_CONFIG = {
+  role:    { label: 'ROLE',    cls: 'tag-role',    desc: 'Sets the model\'s identity and authority domain' },
+  context: { label: 'CONTEXT', cls: 'tag-context', desc: 'Frames the situation, prior work, and known state' },
+  task:    { label: 'TASK',    cls: 'tag-task',    desc: 'The primary instruction — what to produce' },
+  format:  { label: 'FORMAT',  cls: 'tag-format',  desc: 'Output structure, length, and delivery constraints' },
+  chain:   { label: 'CHAIN',   cls: 'tag-chain',   desc: 'Hook for feeding this output into the next prompt' },
+  guard:   { label: 'GUARD',   cls: 'tag-guard',   desc: 'Constraints, exclusions, and failure modes to avoid' },
+};
+```
+
+`cls` is the CSS class applied to the block type badge in the anatomy view. Each has a corresponding color defined in `<style>`.
+
+### Global State
+
+```javascript
+let activeToggles = new Set(['role','context','task','format','chain']);  // guard off by default
+let rawPromptText = '';    // updated after each generation; used by copy button
+let keyVisible = false;    // tracks show/hide state of API key input
+```
 
 ---
 
-## Prompt Architecture — The Six Block Types
+## System Prompt — `buildMetaSystemPrompt(domain, useCase, model, blocks)`
 
-Every generated prompt is composed of up to six typed blocks. These types are defined by the meta-prompt system prompt sent to the model, and by the JSON schema the model is instructed to return.
+This is the only prompt sent to the model. It is rebuilt on every generation from the current UI selections.
 
-| Block | Purpose |
-|---|---|
-| `ROLE` | Model identity, expertise, and authority domain |
-| `CONTEXT` | Situation framing, prior state, what was already done |
-| `TASK` | Primary instruction — single deliverable, scoped and unambiguous |
-| `FORMAT` | Output structure, length, markup requirements |
-| `CHAIN` | Hook making this output directly usable as the next prompt's input |
-| `GUARD` | Explicit exclusions, failure modes to avoid, quality bars |
+**Inputs:**
+- `domain` — value from `#domain` select (e.g. `"code"`, `"system"`)
+- `useCase` — value from `#use-case` select (e.g. `"followup"`, `"chain"`)
+- `model` — value from `#model-target` select (e.g. `"claude"`, `"gpt4"`)
+- `blocks` — array of active block key strings (e.g. `["role","context","task","format"]`)
 
-`GUARD` is off by default and must be enabled per generation via the Components checkboxes. All others are enabled by default.
+**Use case → description mapping (inside the function):**
+```javascript
+const useCaseMap = {
+  followup:  'a follow-up prompt intended to run after the described task is complete...',
+  parallel:  'a parallel prompt that runs alongside the described task...',
+  decompose: 'a decomposition prompt that breaks the described task into...',
+  review:    'a review prompt designed to critique, audit, or QA the output...',
+  chain:     'a chaining prompt that takes the output of the described task...',
+};
+```
 
-### JSON Schema Returned by the Model
+**Model → syntax convention mapping:**
+```javascript
+const modelMap = {
+  claude:   'Claude (Anthropic). Use XML-style tags for structural blocks where helpful...',
+  gpt4:     'GPT-4o or o-series (OpenAI). Use markdown headings for structure. Avoid XML tags...',
+  gemini:   'Gemini 2.0 Flash (Google). Keep instructions concise and well-structured...',
+  agnostic: 'any capable LLM. Write in model-agnostic plain language with no model-specific syntax or tags.',
+};
+```
 
-The system prompt instructs every model to return only valid JSON matching this schema:
-
+**JSON schema instructed in the system prompt:**
 ```json
 {
-  "title": "string",
-  "purpose": "string",
+  "title": "short descriptive title (5-8 words)",
+  "purpose": "one sentence: what this prompt achieves and when to use it",
   "blocks": [
     {
-      "type": "ROLE | CONTEXT | TASK | FORMAT | CHAIN | GUARD",
-      "content": "string",
-      "note": "string — one sentence explaining the engineering decision"
+      "type": "role|context|task|format|chain|guard",
+      "content": "the actual prompt text for this block",
+      "note": "one sentence explaining the engineering decision behind this block"
     }
   ]
 }
 ```
 
-The `note` field is what populates the anatomy view — the per-block engineering rationale, not just what the block says.
+### Changing the Model String
 
-### Adding a New Block Type
+To point Claude at a different model, change it in `MODEL_CONFIG.claude.model` and in `callClaude()`:
 
-1. Add the new type string to the block type enum in the system prompt builders (search for `ROLE | CONTEXT | TASK | FORMAT | CHAIN | GUARD`).
-2. Add a checkbox for it in the Components section of the HTML markup.
-3. Add a case for it in the anatomy view render function that processes the `blocks` array.
-4. Update the system prompt text to explain to the model what this block type means and when to use it.
-
----
-
-## Model Support
-
-### Supported Models
-
-| Label | Model string | Provider | API endpoint |
-|---|---|---|---|
-| Claude | `claude-sonnet-4-6` | Anthropic | `https://api.anthropic.com/v1/messages` |
-| GPT-4o | `gpt-4o` | OpenAI | `https://api.openai.com/v1/chat/completions` |
-| Gemini 2.0 Flash | `gemini-2.0-flash` | Google | `https://generativelanguage.googleapis.com/v1beta/models/...` |
-| Model-Agnostic | — | None (local assembly) | No network request |
-
-### Model-Specific System Prompt Conventions
-
-The system prompt adapts per model before every request. The conventions instructed:
-
-- **Claude** — Use XML tags (`<role>`, `<task>`, etc.) for block delimiters
-- **GPT-4o** — Use Markdown headings (`## ROLE`, `## TASK`, etc.)
-- **Gemini** — Use concise structure, minimize nesting
-- **Model-Agnostic** — Assembled locally from the meta-prompt architecture, no model call
-
-Changing the target model changes the structural conventions in the output, not just a label.
-
-### Adding a New Model
-
-1. Add a new `<option>` in the Target Model `<select>` element in the HTML markup.
-
-2. Write a system prompt builder function for the new model:
 ```javascript
-function buildSystemPromptMyModel(domain, promptUse, components) {
-    // Same structure as existing builders
-    // Specify syntax conventions for the new model
-    return `You are a prompt architect...`;
-}
+// MODEL_CONFIG:
+model: 'claude-opus-5',
+
+// callClaude() body:
+model: 'claude-opus-5',
 ```
 
-3. Add a new API caller function:
+### Changing max_tokens
+
+Each caller has its own `max_tokens`. All three currently use `2000`:
+
 ```javascript
-async function callMyModelAPI(apiKey, systemPrompt, userMessage, onChunk) {
-    const response = await fetch("https://api.mymodel.com/v1/completions", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-            model: "my-model-name",
-            messages: [{ role: "user", content: userMessage }],
-            system: systemPrompt,
-            stream: true,
-        }),
-    });
-    // SSE parsing for this provider's format
-}
+// callClaude:
+max_tokens: 2000,
+
+// callOpenAI:
+max_tokens: 2000,
+
+// callGemini:
+generationConfig: { maxOutputTokens: 2000 },
 ```
 
-4. Add a new SSE parser for this provider's streaming format (see SSE Streaming section below).
+### Adding a New Use Case
 
-5. Add the dispatch case in the main form submit handler that routes to your new caller based on the selected model value.
-
-6. Add an API key input field in the UI for the new provider.
-
----
-
-## SSE Streaming
-
-All three real API callers implement SSE streaming via `ReadableStream`. Each provider uses a different event format — the parsers are separate functions.
-
-### Provider SSE Formats
-
-**Anthropic:**
-```javascript
-// Event type: content_block_delta
-// Target field: event.delta.text (when event.type === "text_delta")
-const data = JSON.parse(line.replace("data: ", ""));
-if (data.type === "content_block_delta" && data.delta?.type === "text_delta") {
-    onChunk(data.delta.text);
-}
+1. Add an `<option>` in the `#use-case` select:
+```html
+<option value="audit">Audit (security/compliance review)</option>
 ```
 
-**OpenAI:**
+2. Add to `useCaseMap` in `buildMetaSystemPrompt()`:
 ```javascript
-// Standard chat completion chunks
-// Target field: choices[0].delta.content
-const data = JSON.parse(line.replace("data: ", ""));
-const text = data.choices?.[0]?.delta?.content;
-if (text) onChunk(text);
+audit: 'a security and compliance audit prompt that reviews the described task for risks, vulnerabilities, and policy violations',
 ```
 
-**Google:**
+3. Add to `uLabels` in `updateMeta()`:
 ```javascript
-// Gemini SSE
-// Target field: candidates[0].content.parts[0].text
-const data = JSON.parse(line.replace("data: ", ""));
-const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-if (text) onChunk(text);
+const uLabels = { ..., audit: 'Audit' };
 ```
-
-### Live Parse Strategy
-
-As chunks arrive, the engine attempts a live JSON parse on the accumulated text on each chunk. If `JSON.parse()` throws (incomplete JSON mid-stream), it falls back to displaying raw accumulated text. Once a full valid JSON is received, the anatomy view renders from the parsed structure.
-
-To change fallback display behavior, find the `try { JSON.parse(...) } catch` block in the streaming handler and edit the `catch` branch.
-
----
-
-## Model-Agnostic Mode
-
-Model-Agnostic mode assembles a structured prompt locally without any network request or API key. It uses the same block type architecture and reads the same domain/promptUse/components configuration as the live model callers, but builds the content deterministically from the meta-prompt template rather than asking a model to generate it.
-
-This mode is useful for: testing the tool without API keys, building prompts offline, or generating consistent baseline prompts for comparison.
-
-To change what the Model-Agnostic assembler produces, find the `assembleModelAgnostic()` function and edit the per-block content templates directly.
-
----
-
-## Domains
-
-The Domain selector controls how the system prompt frames the task. Current options:
-
-`General`, `Code`, `Writing/Docs`, `Data`, `Research`, `System Design`, `Creative`, `QA`
-
-Each domain value is passed to the system prompt builder and used to add domain-specific framing to the meta-prompt instructions.
 
 ### Adding a New Domain
 
-1. Add a new `<option>` in the Domain `<select>` element.
-2. In each system prompt builder function, find the domain switch/conditional and add a case for the new domain value with appropriate framing instructions.
+1. Add an `<option>` in the `#domain` select:
+```html
+<option value="electronics">Electronics & Hardware</option>
+```
+
+2. Add to `dLabels` in `updateMeta()`:
+```javascript
+const dLabels = { ..., electronics: 'Electronics & Hardware' };
+```
+
+3. Optionally add a domain-specific note in `buildMetaSystemPrompt()` if the domain needs special instruction framing. Currently the domain is inserted as plain text — no per-domain branching exists in the function.
 
 ---
 
-## Prompt Use Cases
+## API Callers
 
-The Prompt Use selector determines how the generated prompt is framed structurally. Current options:
+### `callClaude(apiKey, systemPrompt, userMessage, onChunk)`
 
-| Value | What it means |
-|---|---|
-| `follow-up` | Continues from a previous session — CONTEXT block is emphasized |
-| `parallel` | One of several independent prompts for the same task |
-| `decompose` | Breaks a large task into sub-tasks |
-| `review` | Critiques or evaluates output from a previous prompt |
-| `chain` | Output feeds directly into the next prompt — CHAIN block is required |
+```javascript
+headers: {
+  'x-api-key': apiKey,
+  'anthropic-version': '2023-06-01',
+  'anthropic-dangerous-direct-browser-access': 'true',  // required for browser CORS
+}
+body: {
+  model: 'claude-sonnet-4-6',
+  max_tokens: 2000,
+  stream: true,
+  system: systemPrompt,
+  messages: [{ role: 'user', content: userMessage }],
+}
+```
 
-The prompt use value is passed into the system prompt builder and changes the structural emphasis of the generated output.
+SSE field extracted: `evt.delta.text` when `evt.type === 'content_block_delta'` and `evt.delta.type === 'text_delta'`.
 
-### Adding a New Prompt Use
+The `anthropic-dangerous-direct-browser-access` header is required for direct browser-to-API calls (bypasses the normal CORS block). Do not remove it.
 
-1. Add a `<option>` in the Prompt Use `<select>`.
-2. In each system prompt builder, add the new case and describe to the model how to frame the output for this use.
+### `callOpenAI(apiKey, systemPrompt, userMessage, onChunk)`
+
+```javascript
+headers: { 'Authorization': `Bearer ${apiKey}` }
+body: {
+  model: 'gpt-4o',
+  max_tokens: 2000,
+  stream: true,
+  messages: [
+    { role: 'system', content: systemPrompt },
+    { role: 'user',   content: userMessage },
+  ],
+}
+```
+
+SSE field extracted: `evt.choices?.[0]?.delta?.content`
+
+### `callGemini(apiKey, systemPrompt, userMessage, onChunk)`
+
+URL is built dynamically (key in query string):
+```javascript
+const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?key=${apiKey}&alt=sse`;
+```
+
+Body uses Gemini's distinct schema:
+```javascript
+body: {
+  system_instruction: { parts: [{ text: systemPrompt }] },
+  contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+  generationConfig: { maxOutputTokens: 2000 },
+}
+```
+
+SSE field extracted: `evt.candidates?.[0]?.content?.parts?.[0]?.text`
+
+### Adding a New Model Provider
+
+1. Add an entry to `MODEL_CONFIG`:
+```javascript
+mistral: {
+  label: 'Mistral Large',
+  keyLabel: 'Mistral API Key',
+  keyPlaceholder: '...',
+  keyNote: 'Get your key at <a href="https://console.mistral.ai" target="_blank">console.mistral.ai</a>.',
+  endpoint: 'https://api.mistral.ai/v1/chat/completions',
+  model: 'mistral-large-latest',
+},
+```
+
+2. Add an `<option>` in `#model-target`:
+```html
+<option value="mistral">Mistral Large</option>
+```
+
+3. Write a new caller following the same signature:
+```javascript
+async function callMistral(apiKey, systemPrompt, userMessage, onChunk) {
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: 'mistral-large-latest',
+      max_tokens: 2000,
+      stream: true,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userMessage },
+      ],
+    }),
+  });
+  // SSE parsing — Mistral uses OpenAI-compatible format:
+  // evt.choices?.[0]?.delta?.content
+  // ... same reader loop as callOpenAI
+}
+```
+
+4. Add the dispatch branch in the generate button handler:
+```javascript
+} else if (model === 'mistral') {
+  fullText = await callMistral(apiKey, systemPrompt, userMessage, onChunk);
+}
+```
+
+5. Add to `mLabels` in `updateMeta()`:
+```javascript
+const mLabels = { ..., mistral: 'Mistral Large' };
+```
+
+6. Add to `modelMap` in `buildMetaSystemPrompt()`:
+```javascript
+mistral: 'Mistral Large. Use markdown headings. Be explicit about output format.',
+```
 
 ---
 
-## Output Views
+## Model-Agnostic Mode — `buildAgnosticPrompt(domain, useCase, blocks, task)`
 
-The result is displayed in two tabs:
+No API call. Builds and returns a parsed result object directly, bypassing all streaming logic.
 
-**Anatomy view** — Renders each block as a labeled card. Each card shows the block type, the block content, and the `note` field (the engineering rationale). Block type labels are styled with distinct colors.
+```javascript
+// Returns:
+{
+  title: `${useCaseLabel[useCase]} prompt — ${domain}`,
+  purpose: '...',
+  blocks: blocks.map(key => ({
+    type: key,
+    content: blockDefs[key],   // hardcoded template per block type
+    note: TAG_CONFIG[key]?.desc,
+  })),
+}
+```
 
-**Raw view** — Shows the full assembled prompt text, ready to copy. This is what you paste into a new session.
+`blockDefs` contains one hardcoded template string per block type (`role`, `context`, `task`, `format`, `chain`, `guard`). The `task` template varies by `useCase` via a ternary chain. The `role` template varies by `domain`.
 
-### Changing Block Label Colors
-
-Find the CSS block (or inline style) that maps block type strings to colors. The anatomy view applies a class or style per block type — search for `ROLE`, `CONTEXT`, etc. in the `<style>` section.
-
-### Adding a Third View
-
-Add a new tab button in the tab strip markup and a corresponding panel `<div>`. In the render function that fires after a complete JSON is received, add logic to populate the new panel.
-
----
-
-## API Keys
-
-Keys are collected via `<input type="password">` fields in the UI. They are held in JavaScript memory for the session duration only. They are sent exclusively to the respective provider's API endpoint via `fetch()`. They are never written to localStorage, sessionStorage, cookies, or any other persistence mechanism.
-
-To verify: search the `<script>` block for any `localStorage` or `sessionStorage` calls — there are none.
+**To change what agnostic mode produces for a block type**, edit the corresponding string in `blockDefs` inside `buildAgnosticPrompt()`.
 
 ---
 
-## Hosting
+## Rendering
 
-The file is fully self-contained. To host:
+### `renderAnatomy(blocks, parsed, isStreaming)`
 
-- **GitHub Pages** — push to a repo with Pages enabled; the `.html` file serves directly.
-- **Netlify Drop** — drag the file to [netlify.com/drop](https://netlify.com/drop).
-- **Any static host** — no server-side processing required.
+Clears `#anatomy-blocks` and rebuilds it. If `parsed.purpose` exists, prepends it as a muted text paragraph. For each block:
 
-The only outbound connections from a loaded page are:
-1. Google Fonts (optional, graceful fallback)
-2. API calls to whichever provider the user selects, using the key they entered
+- Looks up `TAG_CONFIG[block.type]` for label, CSS class, and fallback desc
+- Creates a `.block` div with a `.block-header` (tag badge + note text) and `.block-body` (content)
+- If `isStreaming` is true and this is the last block, appends a `<span class="cursor">` blinking cursor
+
+The streaming `onChunk` callback calls `renderAnatomy(partial.blocks, partial, true)` on each chunk if `parseJSON()` succeeds, otherwise shows raw accumulated text with a cursor.
+
+### `assembleRaw(blocks)`
+
+Builds the copyable text shown in the Raw tab:
+
+```javascript
+function assembleRaw(blocks) {
+  return blocks.map(b => {
+    const cfg = TAG_CONFIG[b.type] || { label: b.type.toUpperCase() };
+    return `## ${cfg.label}\n${b.content}`;
+  }).join('\n\n');
+}
+```
+
+Output format: `## ROLE\n[content]\n\n## CONTEXT\n[content]\n\n...`
+
+**To change the raw format** (e.g. to XML tags for Claude outputs):
+```javascript
+function assembleRaw(blocks) {
+  return blocks.map(b => {
+    const tag = b.type.toLowerCase();
+    return `<${tag}>\n${b.content}\n</${tag}>`;
+  }).join('\n\n');
+}
+```
+
+### `parseJSON(text)`
+
+```javascript
+function parseJSON(text) {
+  try { return JSON.parse(text); } catch {}
+  try { return JSON.parse(text.replace(/```json|```/g, '').trim()); } catch {}
+  return null;
+}
+```
+
+Two attempts: raw parse first, then strip markdown fences and retry. Returns `null` on both failures — the caller checks for `null` and handles it (either continues streaming or throws an error).
+
+---
+
+## Block Types — Adding a New One
+
+1. Add to `TAG_CONFIG`:
+```javascript
+const TAG_CONFIG = {
+  ...existing,
+  persona: { label: 'PERSONA', cls: 'tag-persona', desc: 'Audience and voice constraints for the output' },
+};
+```
+
+2. Add the CSS class in `<style>`:
+```css
+.tag-persona { background: #7c3aed; color: #fff; }
+```
+
+3. Add a toggle button in `#component-toggles`:
+```html
+<div class="toggle" data-key="persona">
+  <div class="toggle-check"><svg ...checkmark svg...</svg></div>
+  <span>Persona / audience</span>
+</div>
+```
+
+4. Add to `blockDefs` in `buildAgnosticPrompt()`:
+```javascript
+persona: `Write for a [target audience] with [expertise level] background. Adjust vocabulary, assumed knowledge, and examples accordingly.`,
+```
+
+5. Add the type string to the block definitions in `buildMetaSystemPrompt()`:
+```javascript
+// In the block definitions section of the system prompt string:
+- persona: defines the intended audience, their background, and the voice and vocabulary to use
+```
+
+6. Add the type to the schema enum comment in the system prompt:
+```javascript
+"type": "role|context|task|format|chain|guard|persona",
+```
+
+---
+
+## Default Component State
+
+`guard` is the only toggle that starts inactive. This is set two ways:
+
+**In HTML** — the `guard` toggle div lacks the `active` class:
+```html
+<div class="toggle" data-key="guard">...</div>           <!-- no 'active' class -->
+<div class="toggle active" data-key="role">...</div>     <!-- 'active' class present -->
+```
+
+**In JS** — `activeToggles` is initialized without `guard`:
+```javascript
+let activeToggles = new Set(['role','context','task','format','chain']);
+```
+
+To make a block default-off, remove it from both places. To make `guard` default-on, add `active` to its HTML div and add `'guard'` to the `Set`.
+
+---
+
+## API Key Security
+
+Keys are held in the `value` of `#api-key` (`<input type="password">`). They are sent only inside the `fetch()` call for the selected provider. There are no `localStorage`, `sessionStorage`, `cookie`, or `IndexedDB` writes anywhere in the file. Verified: searching the source for any of these returns zero results.
+
+The `autocomplete="off"` and `spellcheck="false"` attributes on `#api-key` prevent the browser from logging or suggesting the key.
 
 ---
 
@@ -277,19 +502,21 @@ The only outbound connections from a loaded page are:
 
 | What you want to do | Where to start |
 |---|---|
-| Add a new block type | System prompt builders + Components checkbox + anatomy view renderer |
-| Add a new model provider | New system prompt builder + new API caller + new SSE parser + new model `<option>` + API key input |
-| Change model-specific syntax conventions | System prompt builder for that model (XML vs Markdown vs concise) |
-| Change what Model-Agnostic mode generates | `assembleModelAgnostic()` function |
-| Add a new domain | Domain `<select>` option + domain case in each system prompt builder |
-| Add a new prompt use case | Prompt Use `<select>` option + case in each system prompt builder |
-| Change block label colors in anatomy view | CSS block — find color map by block type string |
-| Change JSON schema returned by model | System prompt schema definition + anatomy view renderer |
-| Change SSE chunk handling / fallback display | Streaming handler `try/catch` block |
-| Change context window / max tokens | API caller `body` payload — `max_tokens` field |
-| Add a third output view tab | Tab markup + panel `<div>` + render logic in the completion handler |
-| Change default Components selection | Initial checked state of Components checkboxes in HTML |
-| Remove Google Fonts dependency entirely | Delete the `<link>` to fonts.googleapis.com; update font-family stack in CSS |
+| Change the Claude model string | `MODEL_CONFIG.claude.model` + `callClaude()` body |
+| Change max tokens | `max_tokens` / `maxOutputTokens` in each caller |
+| Add a new model provider | `MODEL_CONFIG` + `<option>` + new `call*()` function + dispatch branch + `mLabels` + `modelMap` |
+| Add a new use case | `<option>` in `#use-case` + `useCaseMap` in `buildMetaSystemPrompt()` + `uLabels` in `updateMeta()` |
+| Add a new domain | `<option>` in `#domain` + `dLabels` in `updateMeta()` |
+| Add a new block type | `TAG_CONFIG` + CSS class + toggle HTML + `blockDefs` in agnostic + schema enum in system prompt |
+| Change block badge color | `.tag-*` CSS class in `<style>` |
+| Change raw prompt output format | `assembleRaw()` — currently `## LABEL\ncontent` |
+| Change agnostic output for a block | `blockDefs[key]` string in `buildAgnosticPrompt()` |
+| Change live parse fallback display | `onChunk` callback in the generate handler — the `else` branch |
+| Make guard default-on | Add `active` class to guard toggle HTML + add `'guard'` to `activeToggles` Set |
+| Change model syntax conventions | `modelMap` object in `buildMetaSystemPrompt()` |
+| Change the model's JSON schema | Schema block in `buildMetaSystemPrompt()` return string + `renderAnatomy()` field access |
+| Remove Google Fonts | Delete `<link>` tags in `<head>`; update font-family in CSS |
+| Change streaming chunk poll behavior | SSE `for (const line of chunk.split('\n'))` loop in each caller |
 
 ---
 
