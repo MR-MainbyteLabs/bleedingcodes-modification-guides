@@ -23,7 +23,7 @@ patterns, and what not to touch.
 | guided-build-framework | [guided-build-framework-modification-guide.md](./guided-build-framework-modification-guide.md) |
 | security-scanner | [security-scanner-modification-guide.md](./security-scanner-modification-guide.md) |
 | ssh-vid-mover | [ssh-vid-mover-modification-guide.md](./ssh-vid-mover-modification-guide.md) |
-| PureTrace | [PureTrace-modification-guide.md](./PureTrace-modification-guide.md) |
+| PureTrace | [PureTrace-modification-guide.md](./puretrace-modification-guide.md) |
 | lumen-lang | [lumen-lang-modification-guide.md](./lumen-lang-modification-guide.md) |
 | EvoForge | [EvoForge-modification-guide.md](./evoforge-modification-guide.md) |
 | rd-idea-engine | [rd-idea-engine-modification-guide.md](./rd-idea-engine-modification-guide.md) |
