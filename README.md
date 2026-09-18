@@ -25,7 +25,7 @@ patterns, and what not to touch.
 | ssh-vid-mover | [ssh-vid-mover-modification-guide.md](./ssh-vid-mover-modification-guide.md) |
 | PureTrace | [PureTrace-modification-guide.md](./PureTrace-modification-guide.md) |
 | lumen-lang | [lumen-lang-modification-guide.md](./lumen-lang-modification-guide.md) |
-| EvoForge | [EvoForge-modification-guide.md](./EvoForge-modification-guide.md) |
+| EvoForge | [EvoForge-modification-guide.md](./evoforge-modification-guide.md) |
 | rd-idea-engine | [rd-idea-engine-modification-guide.md](./rd-idea-engine-modification-guide.md) |
 ---
 
