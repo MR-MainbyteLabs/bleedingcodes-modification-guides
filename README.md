@@ -15,6 +15,7 @@ patterns, and what not to touch.
 | sftp-ultra | [sftp-ultra-modification-guide.md](./sftp-ultra-modification-guide.md) |
 | highlight-scraper | [highlight-scraper-modification-guide.md](./highlight-scraper-modification-guide.md) |
 | microcam-benchscope | [microcam-benchscope-modification-guide.md](./microcam-benchscope-modification-guide.md) |
+| pyqt-camera-dashboard | [pyqt-camera-dashboard-modification-guide.md](./pyqt-camera-dashboard-modification-guide.md) |
 ---
 
 Built by [MainbyteLabs](https://github.com/MR-MainbyteLabs)
