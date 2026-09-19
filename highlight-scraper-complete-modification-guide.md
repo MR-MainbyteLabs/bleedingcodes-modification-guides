@@ -1,6 +1,6 @@
 # Highlight Scraper — Complete Modification Guide
 
-**Version:** 0.4.0  
+**Version:** 0.4.1  
 **Covers:** Every source file in the package  
 **Author:** MainbyteLabs  
 
@@ -521,7 +521,10 @@ def _maybe_auto_export(self) -> None:
     raw_path = self.config.get("auto_export_path", "~/highlights.csv")
     out_path = str(Path(raw_path).expanduser())
     try:
-        exporters.export_csv(self.store, self.session_name, out_path)  # change format here
+        # force=True because auto-export writes to the same path repeatedly
+        # by design — each export replaces the previous one.
+        exporters.export_csv(self.store, self.session_name, out_path,
+                             force=True)  # change format here
     except Exception:
         pass
 ```
@@ -659,8 +662,11 @@ a new `url` column (see Part 4 and Part 2).
 
 **Location:** `src/highlight_scraper/export.py`  
 **What it does:** Provides `export_markdown()`, `export_csv()`, and
-`export_json()`. All three take a `CaptureStore`, a session name, and
-an output file path.
+`export_json()`. All three take a `CaptureStore`, a session name, an
+output file path, and an optional `force` keyword argument (default
+`False`). If the output file already exists and `force=False`, they
+raise `FileExistsError` and leave the existing file untouched. Pass
+`force=True` to allow overwriting.
 
 ### Changing the Markdown export format
 
@@ -668,7 +674,8 @@ an output file path.
 chronological flat list, replace the body of the function:
 
 ```python
-def export_markdown(store, session, out_path):
+def export_markdown(store, session, out_path, *, force: bool = False):
+    _guard_overwrite(out_path, force)
     rows = _ordered_rows(store, session)
     title = f"Highlights — {session}" if session else "Highlights — all sessions"
     lines = [f"# {title}", ""]
@@ -685,7 +692,8 @@ def export_markdown(store, session, out_path):
 
 1. Add a new function in `export.py`:
 ```python
-def export_html(store, session, out_path):
+def export_html(store, session, out_path, *, force: bool = False):
+    _guard_overwrite(out_path, force)
     rows = _ordered_rows(store, session)
     title = f"Highlights — {session or 'all sessions'}"
     parts = [f"<html><head><title>{title}</title></head><body>",
@@ -1016,8 +1024,15 @@ def _export_last(self, icon=None, item=None):
         return
     from highlight_scraper import export as exporters
     out = Path.home() / f"{self.session.session_name}_export.md"
-    exporters.export_markdown(self.session.store,
-                               self.session.session_name, str(out))
+    try:
+        # force=True here because tray export to a fixed path is an
+        # intentional overwrite — the user is refreshing the same file.
+        exporters.export_markdown(self.session.store,
+                                   self.session.session_name, str(out),
+                                   force=True)
+    except Exception as e:
+        self.icon.notify(f"Export failed: {e}", "Highlight Scraper")
+        return
     self.icon.notify(f"Exported to {out}", "Highlight Scraper")
 ```
 
@@ -1146,7 +1161,8 @@ def query_by_tag(self, tag: str, session: str = None,
 
 **Step 2 — `export.py`:** Add a tag-filtered export function.
 ```python
-def export_by_tag(store, session, out_path, tag: str):
+def export_by_tag(store, session, out_path, tag: str, *, force: bool = False):
+    _guard_overwrite(out_path, force)
     rows = store.query_by_tag(tag, session=session)
     rows = list(reversed(rows))
     title = f"Highlights tagged [{tag}]"
