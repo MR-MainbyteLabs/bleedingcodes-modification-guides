@@ -7,15 +7,16 @@
 
 ## What This Guide Covers
 
-This guide covers all three editions in the guided-build-framework repo:
+This guide covers all four editions in the guided-build-framework repo:
 
 | Edition | File | Type |
 |---|---|---|
 | Core | `Idea_Generator.md` + `idea_evaluation_system.md` | Two-file, system prompt + user message |
 | 3D Python Games | `Python3d-games-idea-gener-n-tester.md` | Single self-contained file |
 | Public API + Python | `Free-Public-API-n-Python-idea-gener-n-tester.md` | Single self-contained file |
+| Novelty-Weighted | `novelty-weighted-idea-gener-n-tester.md` | Single self-contained file — customize domain list before use |
 
-It covers: what is shared across all editions, what is domain-specific to each, how to safely modify any edition, and how to build a new edition from scratch.
+It covers: what is shared across all editions, what is domain-specific to each, how the Novelty-Weighted edition differs structurally from the others, how to safely modify any edition, and how to build a new edition from scratch.
 
 ---
 
@@ -32,12 +33,31 @@ These two files work together but are not aware of each other at the prompt leve
 
 ### Domain Editions (Single File)
 
-The 3D Games and Public API editions merge both jobs into one file pasted as a **user message**. The AI session starts, generates ideas (Phase 1), hard-stops, then waits for stress-test selection (Phase 2), hard-stops again, then generates a wrapped build prompt on request (Phase 3).
+The 3D Games, Public API, and Novelty-Weighted editions merge both jobs into one file pasted as a **user message**. The AI session starts, generates ideas (Phase 1), hard-stops, then waits for stress-test selection (Phase 2), hard-stops again, then generates a wrapped build prompt on request (Phase 3).
 
 The single-file design means:
 - no system prompt needed
 - all three phases are embedded and gated by hard stops
 - the AI enforces its own role through the embedded system role block at the top
+
+### Novelty-Weighted Edition — Structural Differences
+
+The Novelty-Weighted edition is not a domain lock like 3D Games or Public API. It changes the evaluation axis. Three things differ structurally from every other edition:
+
+**1. Phase 2 runs 16 evaluations, not 15.**
+Evaluation 1 is a dedicated Novelty Audit that runs before the Reality Check. It classifies each idea as GENUINE NOVELTY, INCREMENTAL VARIATION, or COSMETIC RESKIN — with no hedging allowed. A COSMETIC RESKIN with no clear fix path is DROP regardless of how easy the project would be to finish.
+
+**2. The scoring formula has 7 positive scores, not 6.**
+Novelty is added as a seventh positive score (10 = Genuine Novelty, 5–7 = Incremental Variation, 1–3 = Cosmetic Reskin). The formula becomes:
+```
+FINAL SCORE = (sum of 7 positive scores) − (sum of 3 friction scores)
+```
+This is a deliberate change from the base formula. Do not apply the base 6-score formula to this edition.
+
+**3. The domain list is a user-supplied blank, not a fixed seed list.**
+The Phase 1 domain list contains a placeholder (`[YOUR DOMAIN LIST HERE]`) with example seeds below it. Users must replace the placeholder with their own interests before pasting the file. The README calls this out explicitly. Do not remove the placeholder or replace it with a fixed domain — the whole point of this edition is that it works for any domain.
+
+These three differences are load-bearing. Everything else in the Novelty-Weighted edition follows the same structure as the other single-file editions.
 
 ---
 
@@ -55,9 +75,9 @@ Phase 3 — Wrapped Prompt      → ends
 
 The hard stops are what prevent the AI from running ahead. They are literal output blocks the AI is instructed to print exactly, followed by an instruction to stop completely and add no commentary. Do not soften this language — "stop completely" and "DO NOT begin Phase 2" are load-bearing.
 
-### The 15 Stress Test Evaluations (Phase 2)
+### The Stress Test Evaluations (Phase 2)
 
-All editions run all 15 evaluations. The category names and scoring formula are fixed. Only the domain-specific language inside each evaluation changes.
+The Core, 3D Games, and Public API editions run 15 evaluations. The Novelty-Weighted edition runs 16 — the same 15 plus a Novelty Audit prepended as evaluation 1. The category names and evaluation order are otherwise fixed across all editions. Only the domain-specific language inside each evaluation changes.
 
 | # | Evaluation |
 |---|---|
@@ -79,6 +99,7 @@ All editions run all 15 evaluations. The category names and scoring formula are 
 
 ### Scoring Formula
 
+**Core, 3D Games, and Public API editions:**
 ```
 Positive scores (1–10 each):
     Execution Likelihood
@@ -96,7 +117,26 @@ Friction scores (1–10 each, higher = worse):
 FINAL SCORE = (sum of 6 positive scores) − (sum of 3 friction scores)
 ```
 
-Do not change this formula. It is referenced in the stress test and understood by repeat users.
+**Novelty-Weighted edition:**
+```
+Positive scores (1–10 each):
+    Execution Likelihood
+    Novelty  ← added (10 = Genuine Novelty, 5–7 = Incremental Variation, 1–3 = Cosmetic Reskin)
+    Learning Value
+    Reusability
+    Clarity
+    Visible Progress
+    Scope Control
+
+Friction scores (1–10 each, higher = worse):
+    Setup Friction
+    Debugging Friction
+    Maintenance Friction
+
+FINAL SCORE = (sum of 7 positive scores) − (sum of 3 friction scores)
+```
+
+Do not change either formula. Do not apply the 6-score formula to the Novelty-Weighted edition — the Novelty score is structural, not optional.
 
 ### The Wrapped Prompt Rules (Phase 3)
 
@@ -126,6 +166,7 @@ Each edition has a non-negotiable constraints block that defines what every gene
 | Core | None — domain is user-defined |
 | 3D Games | Every idea must open a real rendered window and use real 3D geometry. Terminal/ASCII output is banned outright. |
 | Public API | Every idea must make a real HTTP request to a real live API and use the real response. Mocked or hardcoded data is banned outright. |
+| Novelty-Weighted | Every idea must have a genuine novelty angle — stated explicitly, not implied. Ideas that cannot clear this bar are labeled SAFE BASELINE, never smuggled in as novel. |
 
 When building a new edition, write this block first. It is the single clearest statement of what the domain is and what it refuses to tolerate.
 
@@ -161,6 +202,17 @@ Auth Type (none / free API key / free-tier signup / OAuth):
 Auth/Rate-Limit Risk:
 ```
 
+**Novelty-Weighted edition adds:**
+```
+Novelty Lens Used:           [Cross-domain transplant / Constraint removal / Inversion / Underserved niche / Itch-scratching / SAFE BASELINE]
+Nearest Existing Alternative:
+What's Actually New:
+Groundbreaking Potential (1–5):
+Smallest Working Version (must retain the novel part):   ← replaces the standard Smallest Working Version field
+```
+
+Note: the Novelty-Weighted edition replaces the standard `Smallest Working Version` field with a version that includes an explicit constraint — the smallest version must still contain the novel part. This is intentional: if simplification strips the novelty out, the idea's "new part" is actually the hard part and must be front-loaded, not deferred.
+
 When building a new edition, identify the 1–3 fields that expose the domain's specific failure modes. Those are the fields to add.
 
 ### 3. The Idea Generation Domain List
@@ -188,6 +240,11 @@ All editions target 12–15 ideas and require the same four buckets: quick wins,
 - 3D Games: include at least one PyOpenGL/moderngl idea (not all Ursina)
 - Public API: include at least a couple of no-auth ideas (not all key-required)
 
+The Novelty-Weighted edition replaces one of the four standard buckets and adds two hard limits:
+- Replaces "practically useful projects" bucket with "at least 5 ideas rated Groundbreaking Potential 4–5"
+- Adds: at most 3 SAFE BASELINE ideas — clearly labeled, included only for contrast, not padded to inflate the list
+- Adds: label which novelty lens produced each idea; if no lens fits, it's probably not novel
+
 For a new edition, identify the equivalent constraint — the one that prevents the AI from defaulting to the easiest approach for every idea.
 
 ### 5. Domain-Specific Risk Categories in Phase 2
@@ -207,6 +264,14 @@ The stress test evaluations use domain-specific language for the most important 
 - rate limits and throttling (free-tier daily caps)
 - pagination and inconsistent JSON schemas
 - APIs that quietly change or shut down
+
+**Novelty-Weighted — domain-specific risks called out in Phase 2:**
+- Novelty erosion — how simplification could quietly turn the project into a clone of its nearest existing alternative
+- Cosmetic novelty — an idea that sounds original but differs from an existing thing only in surface details (language choice, UI skin, naming)
+- Novel-but-pointless — genuinely uncommon but with no practical value once built
+- Front-loading failure — deferring the novel part to "later" and building only the generic scaffolding first, then abandoning before the interesting part ships
+
+These risks are surfaced explicitly in evaluation 1 (Novelty Audit), evaluation 8 (Execution Risk Analysis adds `Highest novelty-erosion risk:`), evaluation 15 (execution plan adds `What the novel part looks like at hour 1:`), and Phase 3 (the wrapped prompt includes novelty-protection language).
 
 For a new edition, identify the 4–6 failure modes that are specific to your domain and invisible to someone who hasn't hit them before. Those go into evaluations 2 (Motivation Collapse), 3 (Hidden Complexity), and 8 (Execution Risk Analysis).
 
@@ -238,7 +303,21 @@ What NOT to add:
 Biggest stall risk:
 ```
 
-The difference is one field: `Library setup command(s):` vs. `API setup steps:`. For a new edition, identify the single most important domain-specific first action and encode it as a field here.
+**Novelty-Weighted:**
+```
+Hour 1 task:
+First file to create:
+Smallest working version:
+What the novel part looks like at hour 1 (build this before the plumbing, not after):
+What "done" means:
+Maximum allowed build time:
+What NOT to add:
+Biggest stall risk:
+```
+
+The key addition is `What the novel part looks like at hour 1:` — this forces the novel angle to be built first, not deferred until generic scaffolding is complete. This is the single most important field in the novelty edition's execution plan.
+
+For a new edition, identify the single most important domain-specific first action and encode it as a field here.
 
 ### 7. The Wrapped Prompt's First Steps (Phase 3)
 
@@ -249,6 +328,9 @@ Each edition's guide-first coding rule specifies what the AI must verify before 
 
 **Public API — verify first:**
 > Confirm the API key is obtained (or no-auth access is verified) and a single test request succeeds — even via `curl` or the browser, before any Python is written
+
+**Novelty-Weighted — verify first:**
+> Confirm that the novel part of the idea is the first thing being built, not deferred. If the first working version only contains generic scaffolding, stop and restructure so the novel angle ships before anything else.
 
 For a new edition, the first verification step must be the one thing that, if skipped, causes the most common first-session failure.
 
@@ -270,7 +352,7 @@ Change with care. The four-bucket requirement (quick wins, deep systems, creativ
 
 ### Changing the stress test evaluations
 
-Do not remove evaluations. The 15 evaluations are a unit — removing any one creates blind spots that show up as failed builds later. You can add domain-specific language inside an evaluation, or add a 16th evaluation for a domain-specific concern, but the base 15 must remain.
+Do not remove evaluations. The base 15 evaluations are a unit — removing any one creates blind spots that show up as failed builds later. You can add domain-specific language inside an evaluation, or add an extra evaluation for a domain-specific concern, but the base 15 must remain. The Novelty-Weighted edition already uses 16 — do not remove the Novelty Audit (evaluation 1) from that edition under any circumstances; it is what makes the edition structurally different from the others.
 
 ### Changing the scoring formula
 
@@ -337,6 +419,7 @@ Examples:
 ```
 Python3d-games-idea-gener-n-tester.md
 Free-Public-API-n-Python-idea-gener-n-tester.md
+novelty-weighted-idea-gener-n-tester.md
 ```
 
 Place new edition files in `/framework/` and update the repo README to add a row to the Framework Editions table.
@@ -347,9 +430,10 @@ Place new edition files in `/framework/` and update the repo README to add a row
 
 - [ ] Phase 1 hard stop block is intact and outputs exactly the specified text
 - [ ] Phase 2 hard stop block is intact and outputs exactly the specified text
-- [ ] All 15 stress test evaluations are present
-- [ ] Scoring formula is unchanged
+- [ ] All 15 stress test evaluations are present (16 for the Novelty-Weighted edition — Novelty Audit must be evaluation 1)
+- [ ] Scoring formula is unchanged (6-score formula for Core/3D/API editions; 7-score formula for Novelty-Weighted)
 - [ ] Guide-first coding rule is present in Phase 3
+- [ ] Novelty-Weighted edition: domain list placeholder is intact — not replaced with a fixed list
 - [ ] New edition file added to `/framework/`
 - [ ] README Framework Editions table updated with new file link
 - [ ] README Repository Structure section updated
