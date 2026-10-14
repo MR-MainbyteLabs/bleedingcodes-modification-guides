@@ -70,7 +70,17 @@ the wrong place.
             │ (click-hold paste │
             │  gesture)         │
             └───────────────────┘
+
+            ┌──────────────────────────┐
+            │ unknown_source_prompt.py │
+            │ (fail-closed decision UI)│
+            └──────────────────────────┘
 ```
+
+When source attribution is unavailable, `session_manager.py` asks the
+front end for a decision through this prompt module. The GUI dispatches
+the dialog to its Tk event loop. CLI and tray show the dialog in a child
+process so Tk runs on that process's main thread.
 
 **Rule of thumb for where to make a change:**
 
@@ -84,6 +94,7 @@ the wrong place.
 | System tray menu items | `tray.py` |
 | CLI commands | `cli.py` |
 | What text gets captured vs ignored | `session_manager.py` |
+| Unknown-source warning and save decision | `session_manager.py` + `unknown_source_prompt.py` + front end |
 | When captures get merged into one row | `session_manager.py` |
 | How the X11/Wayland selection is read | `watcher_core.py` |
 | How fast polling runs | `watcher_core.py` or `config.py` |
@@ -167,6 +178,7 @@ Change the path. The directory is created automatically by `storage.py`
 | `min_length` | `3` | Captures shorter than this are silently ignored |
 | `merge_window_seconds` | `2.0` | Drag selections within this window get merged into one row |
 | `excluded_apps` | list | App names — captures from these are silently dropped |
+| `remembered_unknown_sources` | `{}` | Exact window title → source label mappings explicitly saved from the unknown-source prompt |
 | `db_path` | `~/.local/share/...` | Full path to the SQLite database file |
 | `entries_shown` | (GUI default: 10) | GUI list entries shown — written by Settings panel |
 | `auto_export_every` | `0` (off) | Export every N captures automatically — 0 disables |
@@ -507,6 +519,30 @@ via `config.json` or the GUI Settings panel:
 The export runs synchronously in the capture thread but all exceptions
 are caught and silently discarded — a failed export never interrupts
 capture.
+
+### Handling an unidentified source
+
+`_handle()` first checks the configured `excluded_apps`. If the app
+attribution is empty or reports an unknown value, it checks
+`remembered_unknown_sources` for an exact window-title match. Otherwise,
+the capture is held in memory and the front end must return a decision
+before any database write:
+
+- **Continue anyway** saves the capture with the source label
+  `⚠ Unknown source`.
+- **Name source & save** saves it using the entered label. The label is
+  for that capture unless the separate remember checkbox is selected.
+- **Don’t capture**, closing the dialog, a missing response, or a prompt
+  failure discards the capture.
+- **Remember this source** stores an exact window-title-to-label mapping
+  in `remembered_unknown_sources`; later captures with that exact title
+  use the saved label without asking. It is disabled when no title is
+  available.
+
+The warning log records attribution metadata such as the window title,
+never the highlighted text. The merge check also requires a matching
+source identity, so a selection from one app cannot be merged into the
+previous app's row.
 
 ### Changing the auto-export format
 
@@ -881,6 +917,12 @@ Note: Ctrl+V pastes CLIPBOARD not PRIMARY. The user must Ctrl+C first.
 **What it does:** Terminal front end. Provides `start`, `stop`, `status`,
 `tag`, `sessions`, and `export` subcommands.
 
+When a source is unidentified, `_run` assigns the resolver from
+`unknown_source_prompt.py`. The prompt runs in a child process because
+the capture callback runs on a watcher thread; this keeps Tk on the child
+process's main thread. If the prompt cannot open or returns no valid
+decision, the capture is discarded.
+
 ### Adding a `search` command (uses 0.4.0 `storage.search()`)
 
 1. Write the handler:
@@ -980,6 +1022,12 @@ log_path = Path.home() / f".highlight_scraper_{session_name}.log"
 Open data folder, Quit. The tray IS the running session — no separate
 background process.
 
+The tray uses the same unknown-source resolver as the CLI. Its capture
+callback also runs off the UI thread, so the shared prompt module opens a
+child process for the modal dialog. Keep this handoff if you change the
+prompt implementation; creating Tk directly from the watcher thread may
+fail to show the window.
+
 ### Changing the tray icon colours
 
 ```python
@@ -1054,6 +1102,12 @@ self.session.listeners.append(_notify_capture)
 Full visual modification reference (colours, fonts, layout, themes)
 is in `highlight-scraper-gui-modification-guide.md`. This section
 covers programmatic and feature-level modifications.
+
+The GUI supplies its existing Tk root to `unknown_source_prompt.py`.
+The watcher thread places a prompt request on `event_queue` and waits;
+`_drain_queue()` opens the dialog on the UI thread and signals the
+watcher with the selected decision. Keep all Tk widget access on this UI
+thread. Dialog errors leave the default decision as discard.
 
 ### 0.4.0 — Search bar
 
@@ -1138,7 +1192,50 @@ self.status_var.set(f"Browsing: {name}  ({len(rows)} captures shown)")
 
 ---
 
-## Part 12 — Adding a New Feature End-to-End
+## Part 12 — `unknown_source_prompt.py` — Unknown Source Decisions
+
+**Location:** `src/highlight_scraper/unknown_source_prompt.py`  
+**What it does:** Displays the warning and collects one of three
+decisions without displaying the highlighted text. It can attach to the
+GUI's existing Tk root or run as a standalone child process for CLI and
+tray. This feature requires Tkinter (`python3-tk` on Debian/Ubuntu) and a
+graphical display. If the prompt cannot be opened, the capture is discarded.
+
+![Unknown source warning prompt](highlight-scraper_unknown-source.png)
+
+### Prompt result format
+
+The prompt returns a dictionary consumed by
+`CaptureSession.unknown_source_resolver`:
+
+```python
+{"action": "continue", "label": "", "remember": False}
+{"action": "name", "label": "Research notes", "remember": True}
+{"action": "discard", "label": "", "remember": False}
+```
+
+If you add another choice, update both the prompt result and the decision
+handling in `session_manager.py`. Preserve discard as the fallback for
+closed dialogs, invalid responses, and failures. Do not put captured text
+in the dialog or its logs.
+
+### Testing the prompt directly
+
+From the repository root, run:
+
+```bash
+PYTHONPATH=src python3 -m highlight_scraper.unknown_source_prompt <<'EOF'
+{"source_window":"Prompt test"}
+EOF
+```
+
+For capture logic, run `python3 -m pytest -q`. Session-manager tests mock
+the unknown-source choice so they do not depend on whichever desktop
+window happens to be active.
+
+---
+
+## Part 13 — Adding a New Feature End-to-End
 
 Example: **tag-based export** — export only captures with a specific tag.
 
@@ -1240,6 +1337,7 @@ No other files need to change.
 | System tray appearance | `tray.py` | — |
 | CLI commands | `cli.py` | `storage.py` |
 | What gets captured | `session_manager.py` | `watcher_core.py` |
+| Unknown-source warning and decisions | `session_manager.py` | `unknown_source_prompt.py`, `gui.py`, `cli.py`, `tray.py` |
 | Capture deduplication/merging | `session_manager.py` | — |
 | App/window attribution (X11) | `source_info.py` | `session_manager.py` |
 | App/window attribution (Wayland) | `source_info.py` | — |
