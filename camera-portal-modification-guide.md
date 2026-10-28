@@ -24,10 +24,10 @@ Written for engineers who will change the code. It is not a user guide. For inst
 
 | File | Responsibility | Touches network? |
 |---|---|---|
-| `run_server.py` | Entry point. Loads config, asks for the portal password (first run), starts cameras, waits for the modem IP, serves the portal, handles port switching on Renew link | Serves HTTP |
+| `run_server.py` | Entry point. Loads config, asks for the portal password (first run), starts cameras, waits for the modem IP, serves the portal, handles port switching on Renew link; optional TLS cert/key CLI flags | Serves HTTP by default; HTTPS when TLS files are supplied |
 | `camera_core.py` | Camera engine: encrypted config, `CameraWorker` (one thread per camera), `CameraManager` (owns all workers), recording, disk cleanup | RTSP (outbound TCP) |
-| `web_portal.py` | Flask app: pages, JSON API, login, session, MJPEG and snapshot routes | Inbound HTTP |
-| `modem_link.py` | Finds the modem-side interface and private IP, picks the port and secret key, writes `portal_url.txt` | Local sockets only |
+| `web_portal.py` | Flask app: pages, JSON API, login, session, MJPEG and snapshot routes; Secure cookie flag follows TLS mode | Inbound HTTP or HTTPS |
+| `modem_link.py` | Finds the modem-side interface and private IP, picks the port and secret key, writes `portal_url.txt`; link scheme follows TLS mode | Local sockets only |
 | `onvif.py` | ONVIF WS-Discovery and stream-path lookup. Standard library only | UDP multicast, outbound HTTP |
 | `edit_cameras.py` | CLI: `list`, `set-ip`, `set-path`, `check` | TCP connect test |
 | `test_core.py` | Runs the camera engine without the portal | RTSP |
@@ -41,7 +41,7 @@ Written for engineers who will change the code. It is not a user guide. For inst
 3. `ensure_session_secret()`.
 4. `manager.start()`: cameras begin connecting.
 5. `modem_link.get_link()`: blocks until the modem network has a private IP.
-6. `create_app()` then `make_server(link.ip_address, link.port, app, threaded=True)`.
+6. `create_app(..., secure_cookies=...)` then `make_server(..., ssl_context=...)`. Both values are enabled only when both TLS files are supplied.
 7. Loop: wait for a Renew link event, shut the server down, restart it on the new port. The cameras keep running.
 
 ### Frame flow
@@ -218,14 +218,24 @@ Not covered in the README, and no unit file ships with the project. Constraints 
 - Startup order is tolerant: `wait_for_modem()` polls until the modem network has an IP, so the service may start before the network is up.
 - The port and key are stored, so the link survives restarts. Run the venv's Python explicitly.
 
-### 5.8 Serve over HTTPS
+### 5.8 Enable optional HTTPS
 
-Not implemented and not tested. Known touchpoints if you try:
+TLS is opt-in so changing-address job-site and event setups retain their HTTP default. It is implemented across `run_server.py`, `modem_link.py`, and `web_portal.py`:
 
-1. `run_server.py`: `make_server(...)` accepts an `ssl_context` argument.
-2. `modem_link.py`: `ModemLink.url` hardcodes `http://`. That URL is printed in the banner, saved to `portal_url.txt`, and returned by Renew link.
-3. `web_portal.py`: add `SESSION_COOKIE_SECURE=True` to the `app.config.update(...)` call.
-4. Browsers will warn about a self-signed certificate on a private IP.
+1. Supply both `--tls-cert /path/to/cert.pem` and `--tls-key /path/to/key.pem` to `run_server.py`. Supply neither for HTTP. `run_server.py` rejects supplying only one option before starting.
+2. `run_server.py` passes the certificate/key tuple to Werkzeug `make_server(..., ssl_context=...)` and passes `secure_cookies=True` to `create_app()` only in TLS mode.
+3. `web_portal.py` sets `SESSION_COOKIE_SECURE` from that argument. `HttpOnly` and `SameSite=Strict` remain enabled in either mode.
+4. `ModemLink.https` controls the scheme from `ModemLink.url`. This is the URL printed in the banner, written to `portal_url.txt`, and returned after Renew link. `renew_link()` preserves the current scheme. TLS mode is a command-line startup setting, not persisted in `camera_config.json`; pass both options again after each restart to continue using HTTPS.
+5. The certificate must be trusted by the client devices and match the IP address or hostname they use. This is practical when the machine has a stable address/name and a suitable certificate; dynamic IP setups can continue using HTTP on a trusted isolated network.
+6. Do not tell users to bypass browser certificate warnings. A self-signed cert without a trusted installation does not provide a safe plug-and-play TLS experience.
+
+Example:
+
+```bash
+python run_server.py --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem
+```
+
+When adding TLS-related changes, test startup with neither option, with both options, and with only one option (which must fail). Verify the portal URL scheme and login cookie flags in both modes; confirm Renew link keeps the scheme.
 
 ### 5.9 IPv6
 
@@ -246,7 +256,7 @@ These protect the security model. The README and CHANGELOG state them as feature
 7. **Bind to a private IP only.** `modem_link.detect()` rejects loopback and non-private addresses. Do not loosen it, and do not bind to `0.0.0.0`.
 8. **Untrusted text stays text.** Camera names and models come from the network. Templates rely on Jinja autoescaping, and `app.js` uses `textContent`. Never use `innerHTML` with them.
 9. **Rebuild camera addresses from the sender's IP.** `onvif._rebase_url()` ignores the host a camera reports. This stops a device on the network from redirecting the portal or a camera password to another host.
-10. **Keep cookie flags.** `HttpOnly` and `SameSite=Strict` are set in `create_app()`.
+10. **Keep cookie flags.** `HttpOnly` and `SameSite=Strict` are always set in `create_app()`. `Secure` is enabled only when TLS is configured, so login works in the default HTTP mode.
 11. **Import order.** `camera_core.py` sets `OPENCV_FFMPEG_CAPTURE_OPTIONS` before `import cv2`, and its comment says this is required. New entry points should import `camera_core` before any module that imports `cv2`. Note: `test_core.py` and `web_portal.py` import `cv2` first when run alone. In a test with OpenCV 4.13.0 against a local fake RTSP server, the transport was TCP with the variable set before the import, set after it, and not set at all. So on that version the order made no difference to the transport. The `stimeout` part was not tested, and neither was OpenCV 4.8 (the minimum in `requirements.txt`).
 
 ---
@@ -255,7 +265,7 @@ These protect the security model. The README and CHANGELOG state them as feature
 
 | Traffic | Direction | Protocol and port |
 |---|---|---|
-| Portal | Inbound to this computer | TCP, random port 20000–60999, shown in the banner |
+| Portal | Inbound to this computer | TCP, random port 20000–60999, shown in the banner; HTTP by default, HTTPS with TLS flags |
 | Camera video | Outbound to each camera | RTSP over TCP, port 554 or the camera's saved port |
 | Find cameras probe | Outbound, multicast | UDP to `239.255.255.250:3702` |
 | Find cameras replies | Inbound | UDP, unicast, to a random local port |
@@ -280,7 +290,8 @@ There are no automated tests. Run what applies:
    - Find cameras lists cameras and marks existing ones **Added**.
    - Start and stop recording, then confirm the file lands in `recordings/YYYY-MM-DD/HH/`.
    - Reconnect an Offline camera.
-   - Renew link: old link stops working, the other device is signed out, this browser moves to the new link.
+    - Renew link: old link stops working, the other device is signed out, this browser moves to the new link.
+    - TLS modes: start with neither TLS flag and verify HTTP login has no `Secure` cookie attribute; start with a trusted cert/key and verify HTTPS login has `Secure`; supplying only one TLS flag must be rejected. Renew link must retain HTTP/HTTPS scheme.
 5. If you changed `edit_cameras.py`, test it with the server stopped.
 
 ---
@@ -301,7 +312,7 @@ This repo keeps its version in `pyproject.toml` and in `camera_core.py` (`__vers
 ## 10. Known Limits After Modification
 
 - Development-grade HTTP server. `run_server.py` uses Werkzeug's `make_server` with `threaded=True`, not a production WSGI server.
-- Plain HTTP, Linux only, IPv4 only.
+- HTTP remains the default and has no transport encryption; use only on a trusted network. Optional HTTPS requires a suitable certificate/key pair and trusted certificate on client devices. Linux only, IPv4 only.
 - Login lockout counters live in memory and reset when the server restarts.
 - A hard kill can leave the MP4 being written unplayable. Ctrl+C shuts down cleanly.
 
