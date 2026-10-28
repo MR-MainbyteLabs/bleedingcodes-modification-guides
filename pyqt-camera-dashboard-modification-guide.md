@@ -104,14 +104,14 @@ class CameraConfig:
 
 ---
 
-## Encryption — `load_or_create_key`, `encrypt_config`, `decrypt_config`
+## Encryption — `load_or_create_key`, `decrypt_config`, `save_camera_details`
 
 Uses `cryptography.fernet.Fernet` — AES-128-CBC + HMAC-SHA256. The key is a URL-safe base64-encoded 32-byte random value.
 
 ### Key lifecycle
 
-1. `load_or_create_key()` — called once in `main()`. If `secret.key` does not exist, generates a new key, writes it with `chmod 0o600` (owner read/write only), returns the bytes. If it exists, reads and returns it.
-2. Every `save_camera_details()` call writes plaintext JSON then immediately calls `encrypt_config()`, which overwrites the file with Fernet-encrypted bytes. The plaintext never persists on disk.
+1. `load_or_create_key()` — called once in `main()`. If `secret.key` does not exist, creates it with restrictive permissions where supported; if it exists, reads it and attempts to restrict its permissions.
+2. `save_camera_details()` serializes and encrypts JSON in memory, writes ciphertext to a restrictive temporary file, flushes it, then atomically replaces the config. The serialized plaintext is not written to the config or temporary file.
 3. `decrypt_config()` decrypts and returns a parsed `dict`. Called by `load_camera_details()` at startup.
 
 ### Changing the key location
@@ -120,7 +120,7 @@ Uses `cryptography.fernet.Fernet` — AES-128-CBC + HMAC-SHA256. The key is a UR
 KEY_FILE = "/etc/camera-dashboard/secret.key"
 ```
 
-Ensure the path exists and is writable. The `chmod 0o600` call in `load_or_create_key()` still applies.
+Ensure the path exists and is writable. POSIX permissions are restricted where supported; use platform ACLs on Windows.
 
 ### Rotating the encryption key
 
@@ -134,7 +134,7 @@ There is no built-in key rotation. To rotate manually:
 
 To replace Fernet with a secrets manager (e.g. `python-keyring`, HashiCorp Vault, AWS SSM):
 
-1. Replace `load_or_create_key()`, `encrypt_config()`, and `decrypt_config()` with calls to your secrets backend.
+1. Replace `load_or_create_key()`, `save_camera_details()`, and `decrypt_config()` with calls to your secrets backend.
 2. `save_camera_details()` and `load_camera_details()` call these functions — no other changes needed as long as the JSON structure (`{"cameras": [...]}`) is preserved.
 
 ---
@@ -194,7 +194,7 @@ The bridge between raw JSON dicts and the frozen `CameraConfig`. Reads `name`, `
 ### `save_camera_details(camera_details: list[dict], key: bytes)`
 
 1. Writes `{"cameras": camera_details}` as indented JSON to `CONFIG_FILE`.
-2. Immediately calls `encrypt_config(key)` — the plaintext is overwritten before the function returns.
+2. Encrypts the JSON in memory, writes it to a temporary file, and atomically replaces the config.
 
 ### `load_camera_details(key: bytes, parent) -> list[dict]`
 
@@ -545,7 +545,7 @@ worker.wait(3000)
 | Add a new field to camera setup wizard | `prompt_for_camera_details()` + `CameraConfig` + `camera_details_to_config()` |
 | Support pre-built RTSP URLs directly | Store `"url"` key in JSON config — already handled by `camera_details_to_config()` |
 | Rotate the encryption key | Decrypt manually with old key, delete both files, restart app |
-| Replace Fernet with an external secrets manager | Replace `load_or_create_key`, `encrypt_config`, `decrypt_config` |
+| Replace Fernet with an external secrets manager | Replace `load_or_create_key`, `save_camera_details`, `decrypt_config` |
 | Use only the capture/recording logic | Import `CameraConfig`, `CameraWorker` directly |
 | Change RTSP connection timeout | `OPENCV_FFMPEG_CAPTURE_OPTIONS` env var — `stimeout` value in microseconds |
 
