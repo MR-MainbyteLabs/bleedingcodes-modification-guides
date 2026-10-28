@@ -1,5 +1,5 @@
 # sftp-ultra — Modification Guide
-**Version:** 1.0.1  
+**Version:** 1.1.0  
 **Package:** `src/sftp_ultra/`  
 **Entry point:** `sftp_ultra.cli:main`
 
@@ -61,7 +61,7 @@ class Config:
     destination: Path                    # Local destination root
     workers: int                         # ThreadPoolExecutor max_workers
     retries: int                         # Retry count per file
-    timeout_seconds: int                 # SSH connect/auth/banner timeout
+    timeout_seconds: int                 # SSH connect/auth/banner + SFTP data-read timeout
     overwrite: OverwritePolicy           # skip | replace | rename | ask
     checksum: ChecksumMode               # none | sha256
     resume: bool                         # Resume .part files
@@ -165,7 +165,17 @@ ssh.connect(
 )
 ```
 
+Note: `connect()` currently passes `allow_agent=False, look_for_keys=False` on purpose — the tool enforces the README's password-only promise; if you later add real key auth, drop these two only along with the `--identity-file` feature (and update README:45).
+
 5. Update `prompt_credentials()` to make the password prompt conditional on `identity_file` being absent.
+
+### Credentials — `prompt_credentials()`
+
+Order of credential resolution (F11 fix):
+
+1. `SFTP_ULTRA_PASSWORD` environment variable (non-interactive path for unattended/CI machines; never logged).
+2. Interactive `getpass` prompt — only on a real TTY.
+3. Refusal: no TTY on stdin and no credential source → `ValueError` → exit code 2. This deliberately removes getpass' fallback into a read() on a non-tty stdin, where the typed password may be *echoed*.
 
 ### Changing the Host Key Policy
 
@@ -173,12 +183,20 @@ Controlled by `Config.trust_unknown_host`. The mapping is in `_new_ssh()`:
 
 ```python
 if self.config.trust_unknown_host:
+    # TOFU: load_host_keys(path) sets the known-hosts filename, which is
+    # what makes AutoAddPolicy PERSIST accepted keys instead of trusting
+    # them in memory only (audit finding 3).
+    known_hosts = TOOL_KNOWN_HOSTS
+    known_hosts.parent.mkdir(parents=True, exist_ok=True)
+    if not known_hosts.exists():
+        known_hosts.touch()
+    ssh.load_host_keys(str(known_hosts))
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 else:
     ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
 ```
 
-To add a known-hosts file path, replace `load_system_host_keys()` with `load_host_keys(path)`.
+The tool pins accepted unknown-host keys to `~/.local/state/sftp-ultra/known_hosts` (first run: accept + save; later runs: verify against the pin, and a changed key still fails with `BadHostKeyException`). This file is tool-specific on purpose — `~/.ssh/known_hosts` is never written, so other SSH sessions don't inherit tool connections. Document any policy change in README and `--help`.
 
 ---
 
@@ -186,13 +204,11 @@ To add a known-hosts file path, replace `load_system_host_keys()` with `load_hos
 
 ### `remote_walk(sftp, directory) -> Iterator[RemoteFile]`
 
-Recursive walk of a remote directory. Uses `lstat()` explicitly on every entry (not `stat()`) to prevent symlink-to-directory from escaping root confinement. Symlinks are skipped entirely — files and directories only.
+Recursive walk of a remote directory. Uses `lstat()` explicitly on every entry (not `stat()`) to prevent symlink-to-directory from escaping root confinement. Symlinks are skipped entirely — files and directories only. Server entries named `.` or `..` — and any name that would join more than one part onto the walk position — are refused with a warning (audit finding 7), and file attributes that omit `st_size`/`st_mtime` are defaulted to `0` instead of crashing with `TypeError`.
 
 ### `discover_patterns(sftp, *, root, patterns) -> list[RemoteFile]`
 
-Walks from `root`, matches filenames (not full paths) against each pattern using `fnmatch.fnmatchcase` after case-folding both the pattern and the filename. Returns deduplicated results.
-
-**To match on full paths instead of filenames:** replace `remote_file.path.name.casefold()` with `str(remote_file.path).casefold()` in `discover_patterns()`.
+Matches each pattern case-folded via `fnmatch.fnmatchcase`. Patterns without `/` match the basename (original behaviour). Patterns containing `/` are matched against the path relative to the configured root — so `sub/*.mp4` only ever matches files below `sub/` (audit finding 10; previously dropped the directory component entirely and matched everywhere). Returns deduplicated results.
 
 ### `discover_directories(sftp, *, root, directories) -> list[RemoteFile]`
 
@@ -311,24 +327,26 @@ The `.meta` sidecar is written before the download starts and cleared after `os.
 Handles one `PlanItem`. Retry loop: up to `config.retries + 1` attempts with exponential backoff and jitter (`min(30.0, 2^(attempt-1) + random())`).
 
 Per attempt:
-1. Opens SFTP connection via `factory.open()`
-2. Stats remote before download
-3. Downloads via `copy_with_resume()`
-4. Stats remote after download
-5. Checks size and mtime consistency (before == after)
-6. Checks local size against remote
-7. Optionally runs SHA-256 comparison
-8. Atomically renames `.part` → destination via `os.replace()`
-9. Optionally deletes remote source
-10. Records result to journal
+1. Refuses non-regular remote files (lstat guard — mirrors discovery, defeating symlinks planted in the planning→execution window) (audit finding 8)
+2. Opens SFTP connection via `factory.open()` (a fresh client is closed if `open_sftp()` itself fails — review finding N1)
+3. Stats remote before download (a `FileNotFoundError` from attempt ≥ 2 means the *previous* attempt already completed the move — reported as success, not retried) (audit finding 5)
+4. Downloads via `copy_with_resume()`
+5. Stats remote after download
+6. Checks size and mtime consistency (before == after)
+7. Checks local size against remote
+8. Optionally runs SHA-256 comparison
+9. Re-applies the overwrite policy at transfer time (skip → refuse a destination created after planning; rename → retarget if the planned name was taken meanwhile) (audit finding 6)
+10. Atomically renames `.part` → destination via `os.replace()`
+11. Optionally deletes remote source
+12. Records result to journal (with the transfer-time stats; dry-run rows live in their own `run_kind` namespace) — a journal failure is logged and swallowed: it must never retry or fail a completed transfer (audit findings 5, 12, N2)
 
-On exhausted retries: records `Status.FAILED` to journal and returns.
+On exhausted retries: records `Status.FAILED` to journal and returns. The retried exception set is narrowed to `(OSError, TimeoutError, paramiko.SSHException, EOFError, RuntimeError)`; unexpected classes propagate.
 
 ### `run_plan(plan, *, config, factory) -> list[Result]`
 
-Instantiates `Journal` and `TokenBucket`, then dispatches all non-dry-run items to a `ThreadPoolExecutor`. Results are collected via `as_completed()`.
+Instantiates `Journal` and `TokenBucket`, then dispatches all non-dry-run items to a `ThreadPoolExecutor`. Results are collected via `as_completed()`. The journal is closed in a `finally` (one long-lived connection — audit finding 12).
 
-**Dry-run path:** journals all items as `Status.PLANNED` or `Status.SKIPPED` without doing any I/O, then returns immediately.
+**Dry-run path:** journals all items as `Status.PLANNED` or `Status.SKIPPED` without doing any I/O, then returns immediately. Dry-run rows go to the `dry_run` `run_kind` namespace and therefore cannot overwrite the real statuses of a previous run (audit finding 12).
 
 ### Adding a New Checksum Mode
 
@@ -380,22 +398,24 @@ Single table: `transfer_journal`
 
 ```sql
 CREATE TABLE IF NOT EXISTS transfer_journal (
-    remote_path TEXT PRIMARY KEY,
+    remote_path TEXT NOT NULL,
     local_path TEXT,
     status TEXT NOT NULL,
     remote_size INTEGER,
     remote_mtime INTEGER,
     checksum TEXT,
     message TEXT,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    run_kind TEXT NOT NULL DEFAULT 'session',
+    PRIMARY KEY (remote_path, run_kind)
 );
 ```
 
-`remote_path` is the primary key. Repeated transfers of the same remote file update the existing row (`ON CONFLICT DO UPDATE`).
+`(remote_path, run_kind)` is the primary key. Repeated transfers of the same remote file update the existing row (`ON CONFLICT DO UPDATE`); dry runs write to `run_kind = 'dry_run'` and never clobber `session` rows (audit finding 12).
 
-### `Journal.record(result, *, remote_size, remote_mtime)`
+### `Journal.record(result, *, remote_size, remote_mtime, run_kind='session')`
 
-Thread-safe via `threading.Lock()`. Opens a new SQLite connection per write — this is intentional. SQLite connections are not safe to share across threads; the lock serializes writes but each call gets its own connection object.
+Thread-safe via `threading.Lock()`. The Journal keeps ONE long-lived SQLite connection (opened with `check_same_thread=False`; the lock serializes writes) and closes it in `close()` — `run_plan()` calls it in a `finally`. Previously a new connection was opened per record and never explicitly closed (audit finding 12).
 
 ### Adding Journal Columns
 
