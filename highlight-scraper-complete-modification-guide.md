@@ -1,6 +1,6 @@
 # Highlight Scraper — Complete Modification Guide
 
-**Version:** 0.4.1  
+**Version:** 0.4.2  
 **Covers:** Every source file in the package  
 **Author:** MainbyteLabs  
 
@@ -70,17 +70,7 @@ the wrong place.
             │ (click-hold paste │
             │  gesture)         │
             └───────────────────┘
-
-            ┌──────────────────────────┐
-            │ unknown_source_prompt.py │
-            │ (fail-closed decision UI)│
-            └──────────────────────────┘
 ```
-
-When source attribution is unavailable, `session_manager.py` asks the
-front end for a decision through this prompt module. The GUI dispatches
-the dialog to its Tk event loop. CLI and tray show the dialog in a child
-process so Tk runs on that process's main thread.
 
 **Rule of thumb for where to make a change:**
 
@@ -94,7 +84,6 @@ process so Tk runs on that process's main thread.
 | System tray menu items | `tray.py` |
 | CLI commands | `cli.py` |
 | What text gets captured vs ignored | `session_manager.py` |
-| Unknown-source warning and save decision | `session_manager.py` + `unknown_source_prompt.py` + front end |
 | When captures get merged into one row | `session_manager.py` |
 | How the X11/Wayland selection is read | `watcher_core.py` |
 | How fast polling runs | `watcher_core.py` or `config.py` |
@@ -128,6 +117,8 @@ DEFAULTS = {
     "min_length": 3,
     "merge_window_seconds": 2.0,
     "excluded_apps": [...],
+    # see "Changing the exclude list" — fail-closed privacy knob
+    "exclude_unattributed_apps": True,
     "db_path": "...",
     "my_new_setting": 99,   # add your key here with its default
 }
@@ -178,7 +169,7 @@ Change the path. The directory is created automatically by `storage.py`
 | `min_length` | `3` | Captures shorter than this are silently ignored |
 | `merge_window_seconds` | `2.0` | Drag selections within this window get merged into one row |
 | `excluded_apps` | list | App names — captures from these are silently dropped |
-| `remembered_unknown_sources` | `{}` | Exact window title → source label mappings explicitly saved from the unknown-source prompt |
+| `exclude_unattributed_apps` | `true` | When there is no app attribution (e.g. GNOME Wayland, missing xdotool), skip capture instead of risking an excluded app's content |
 | `db_path` | `~/.local/share/...` | Full path to the SQLite database file |
 | `entries_shown` | (GUI default: 10) | GUI list entries shown — written by Settings panel |
 | `auto_export_every` | `0` (off) | Export every N captures automatically — 0 disables |
@@ -396,10 +387,14 @@ CLIPBOARD (Ctrl+C) instead, change the xclip command:
 ```python
 @staticmethod
 def _read_primary_xclip() -> str:
-    result = subprocess.run(
-        ["xclip", "-selection", "clipboard", "-o"],   # change "primary" to "clipboard"
-        capture_output=True, text=True, timeout=1,
-    )
+    try:
+        result = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-o"],   # change "primary" to "clipboard"
+            capture_output=True, text=True, timeout=1,
+        )
+        return result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
 ```
 
 And for Wayland, remove `"--primary"` from the `wl-paste` command in
@@ -407,7 +402,11 @@ And for Wayland, remove `"--primary"` from the `wl-paste` command in
 
 ### Adding a new backend
 
-1. Add a new method to `SelectionWatcher`:
+1. Add a new method to `SelectionWatcher`. Keep the per-iteration
+   exception cage shown below — every shipped loop has one, so a single
+   broken iteration (decode error, transient failure, a bug in
+   `on_change`) degrades capture for one cycle instead of silently
+   killing the thread:
 ```python
 def _run_x11_xsel_polling(self):
     last_seen = ""
@@ -420,13 +419,24 @@ def _run_x11_xsel_polling(self):
             text = result.stdout
         except (FileNotFoundError, subprocess.TimeoutExpired):
             text = ""
-        if text and text != last_seen:
-            last_seen = text
-            self.on_change(text)
+        except Exception as e:
+            # unexpected failure must not kill capture
+            print(f"[watcher] xsel capture error: {e}", flush=True)
+            text = ""
+        try:
+            if text and text != last_seen:
+                last_seen = text
+                self.on_change(text)
+        except Exception as e:
+            print(f"[watcher] xsel capture error: {e}", flush=True)
         time.sleep(self.poll_interval)
 ```
 
-2. Add it to `_pick_backend()` with its condition:
+2. Add it to `_pick_backend()` with its condition — note the X11 part
+   of `_pick_backend()` requires `xclip` unconditionally on X11 (even the
+   event-driven Xfixes mode reads through it), so place your condition
+   before that block, or relax `has_xclip` if your backend doesn't need
+   xclip at all:
 ```python
 if shutil.which("xsel"):
     return self._run_x11_xsel_polling, "X11 (xsel polling)"
@@ -468,6 +478,14 @@ The check is case-insensitive substring match against the app name
 returned by `source_info.py`. `"firefox"` in the list blocks all
 captures from any window whose app name contains "firefox".
 
+**Fail-closed behavior (0.4.2):** if app attribution is unavailable
+(`app is None` — other compositors, missing `xdotool`, attribution
+timeouts) and `excluded_apps` is non-empty, the capture is **skipped**:
+the code cannot prove the highlight is not from an excluded app, so it
+errs on the private side. Set `"exclude_unattributed_apps": false` to
+keep capturing unattributed highlights anyway. With an empty
+`excluded_apps` list, no attribution-based filtering happens at all.
+
 ### Changing the merge window
 
 ```json
@@ -479,18 +497,24 @@ very large drag selections.
 
 ### Changing what counts as a merge
 
-The `_looks_like_extension()` function in `session_manager.py`:
+The `_looks_like_extension()` function in `session_manager.py`
+(current behavior — a pure prefix relation, so interior re-selections
+become new rows instead of overwriting the prior capture):
+
 ```python
 def _looks_like_extension(old_text: str, new_text: str) -> bool:
     if not old_text or not new_text:
         return False
-    return old_text in new_text or new_text in old_text
+    return new_text.startswith(old_text) or old_text.startswith(new_text)
 ```
 
 Alternatives:
+
 ```python
-# Only merge if extending forward (no backtracking)
-return new_text.startswith(old_text) or old_text.startswith(new_text)
+# Old pre-0.4.2 behavior — substring containment. NOT recommended:
+# a short selection *inside* the previous highlight would be treated
+# as the same highlight "shrunk" and silently overwrites/destroys it.
+return old_text in new_text or new_text in old_text
 
 # Disable merging entirely
 return False
@@ -519,30 +543,6 @@ via `config.json` or the GUI Settings panel:
 The export runs synchronously in the capture thread but all exceptions
 are caught and silently discarded — a failed export never interrupts
 capture.
-
-### Handling an unidentified source
-
-`_handle()` first checks the configured `excluded_apps`. If the app
-attribution is empty or reports an unknown value, it checks
-`remembered_unknown_sources` for an exact window-title match. Otherwise,
-the capture is held in memory and the front end must return a decision
-before any database write:
-
-- **Continue anyway** saves the capture with the source label
-  `⚠ Unknown source`.
-- **Name source & save** saves it using the entered label. The label is
-  for that capture unless the separate remember checkbox is selected.
-- **Don’t capture**, closing the dialog, a missing response, or a prompt
-  failure discards the capture.
-- **Remember this source** stores an exact window-title-to-label mapping
-  in `remembered_unknown_sources`; later captures with that exact title
-  use the saved label without asking. It is disabled when no title is
-  available.
-
-The warning log records attribution metadata such as the window title,
-never the highlighted text. The merge check also requires a matching
-source identity, so a selection from one app cannot be merged into the
-previous app's row.
 
 ### Changing the auto-export format
 
@@ -759,19 +759,19 @@ EXPORTERS = {
 p_export.add_argument("--format", choices=["md", "csv", "json", "html"], required=True)
 ```
 
-4. Add it to the GUI export dialog in `gui.py`'s `_do_export()`:
+4. Add it to the GUI export path in `gui.py`. The exporter dict lives
+in the module-level `_export_to()` helper (which always passes
+`force=True` — the save dialog already confirms the overwrite):
 ```python
-path = filedialog.asksaveasfilename(
-    filetypes=[("Markdown", "*.md"), ("CSV", "*.csv"),
-               ("JSON", "*.json"), ("HTML", "*.html")],
-    ...
-)
-exporter = {
-    "md":   exporters.export_markdown,
-    "csv":  exporters.export_csv,
-    "json": exporters.export_json,
-    "html": exporters.export_html,
-}.get(ext, exporters.export_markdown)
+def _export_to(store, session_name: str, path: str) -> None:
+    ext = Path(path).suffix.lstrip(".").lower()
+    exporter = {
+        "md":   exporters.export_markdown,
+        "csv":  exporters.export_csv,
+        "json": exporters.export_json,
+        "html": exporters.export_html,
+    }.get(ext, exporters.export_markdown)
+    exporter(store, session_name, path, force=True)
 ```
 
 ### Changing the CSV column order
@@ -917,12 +917,6 @@ Note: Ctrl+V pastes CLIPBOARD not PRIMARY. The user must Ctrl+C first.
 **What it does:** Terminal front end. Provides `start`, `stop`, `status`,
 `tag`, `sessions`, and `export` subcommands.
 
-When a source is unidentified, `_run` assigns the resolver from
-`unknown_source_prompt.py`. The prompt runs in a child process because
-the capture callback runs on a watcher thread; this keeps Tk on the child
-process's main thread. If the prompt cannot open or returns no valid
-decision, the capture is discarded.
-
 ### Adding a `search` command (uses 0.4.0 `storage.search()`)
 
 1. Write the handler:
@@ -1022,12 +1016,6 @@ log_path = Path.home() / f".highlight_scraper_{session_name}.log"
 Open data folder, Quit. The tray IS the running session — no separate
 background process.
 
-The tray uses the same unknown-source resolver as the CLI. Its capture
-callback also runs off the UI thread, so the shared prompt module opens a
-child process for the modal dialog. Keep this handoff if you change the
-prompt implementation; creating Tk directly from the watcher thread may
-fail to show the window.
-
 ### Changing the tray icon colours
 
 ```python
@@ -1102,12 +1090,6 @@ self.session.listeners.append(_notify_capture)
 Full visual modification reference (colours, fonts, layout, themes)
 is in `highlight-scraper-gui-modification-guide.md`. This section
 covers programmatic and feature-level modifications.
-
-The GUI supplies its existing Tk root to `unknown_source_prompt.py`.
-The watcher thread places a prompt request on `event_queue` and waits;
-`_drain_queue()` opens the dialog on the UI thread and signals the
-watcher with the selected decision. Keep all Tk widget access on this UI
-thread. Dialog errors leave the default decision as discard.
 
 ### 0.4.0 — Search bar
 
@@ -1192,50 +1174,7 @@ self.status_var.set(f"Browsing: {name}  ({len(rows)} captures shown)")
 
 ---
 
-## Part 12 — `unknown_source_prompt.py` — Unknown Source Decisions
-
-**Location:** `src/highlight_scraper/unknown_source_prompt.py`  
-**What it does:** Displays the warning and collects one of three
-decisions without displaying the highlighted text. It can attach to the
-GUI's existing Tk root or run as a standalone child process for CLI and
-tray. This feature requires Tkinter (`python3-tk` on Debian/Ubuntu) and a
-graphical display. If the prompt cannot be opened, the capture is discarded.
-
-![Unknown source warning prompt](highlight-scraper_unknown-source.png)
-
-### Prompt result format
-
-The prompt returns a dictionary consumed by
-`CaptureSession.unknown_source_resolver`:
-
-```python
-{"action": "continue", "label": "", "remember": False}
-{"action": "name", "label": "Research notes", "remember": True}
-{"action": "discard", "label": "", "remember": False}
-```
-
-If you add another choice, update both the prompt result and the decision
-handling in `session_manager.py`. Preserve discard as the fallback for
-closed dialogs, invalid responses, and failures. Do not put captured text
-in the dialog or its logs.
-
-### Testing the prompt directly
-
-From the repository root, run:
-
-```bash
-PYTHONPATH=src python3 -m highlight_scraper.unknown_source_prompt <<'EOF'
-{"source_window":"Prompt test"}
-EOF
-```
-
-For capture logic, run `python3 -m pytest -q`. Session-manager tests mock
-the unknown-source choice so they do not depend on whichever desktop
-window happens to be active.
-
----
-
-## Part 13 — Adding a New Feature End-to-End
+## Part 12 — Adding a New Feature End-to-End
 
 Example: **tag-based export** — export only captures with a specific tag.
 
@@ -1317,7 +1256,9 @@ def _do_export_by_tag(self, store, session_name, tag):
     )
     if not path:
         return
-    export_by_tag(store, session_name, path, tag=tag)
+    # force=True: the save dialog already confirmed the overwrite — without
+    # it the exporter would raise FileExistsError after the confirmation
+    export_by_tag(store, session_name, path, tag=tag, force=True)
     messagebox.showinfo("Export", f"Written to:\n{path}")
 ```
 
@@ -1337,7 +1278,6 @@ No other files need to change.
 | System tray appearance | `tray.py` | — |
 | CLI commands | `cli.py` | `storage.py` |
 | What gets captured | `session_manager.py` | `watcher_core.py` |
-| Unknown-source warning and decisions | `session_manager.py` | `unknown_source_prompt.py`, `gui.py`, `cli.py`, `tray.py` |
 | Capture deduplication/merging | `session_manager.py` | — |
 | App/window attribution (X11) | `source_info.py` | `session_manager.py` |
 | App/window attribution (Wayland) | `source_info.py` | — |
